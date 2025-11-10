@@ -89,29 +89,34 @@ def describe_function(ea):
     print(f"Prototype: {proto}")
 
 
-def set_function_signature(name: str, resh_type: ReshDataType):
+def set_function_signature(name: str, ida_type: tinfo_t):
     logger.info(f"Function signature '{name}'")
-    resh_type_content: ReshDataTypeContentFunction = resh_type.content # typing:ignore
+    #resh_type_content: ReshDataTypeContentFunction = resh_type.content # typing:ignore
     func_ea=get_name_ea(ida_idaapi.BADADDR, name)
     if func_ea is None:
         logger.warning(f"Can't find function address for '{name}'")
         return
 
+    # https://gist.github.com/icecr4ck/7a7af3277787c794c66965517199fc9c?permalink_comment_id=5226755#gistcomment-5226755
+    if not apply_tinfo(func_ea, ida_type, TINFO_DEFINITE):
+        logger.error(f"Failed to apply new type to function at 0x{func_ea:X}")
+    else:
+        logger.info(f"Successfully applied function prototype to {name}")
     # https://reverseengineering.stackexchange.com/questions/30786/idapython-get-function-parameter-type-name
     # https://reverseengineering.stackexchange.com/questions/18141/ida-changing-type-of-arguments-to-local-type
-    tif = tinfo_t()
-    funcdata = func_type_data_t()
-    if not get_tinfo(tif, func_ea):
-        logger.warning(f"Can't get type info for {func_ea}")
-        return
-    if not tif.get_func_details(funcdata):
-        logger.warning(f"Can't get function type info for {func_ea}")
-        return
-    for i, resh_arg in enumerate(resh_type_content.arguments):
-        if i>=len(funcdata):
-            #TODO
-            continue
-        print(funcdata[i].type, resh_arg)
+    #tif = tinfo_t()
+    #funcdata = func_type_data_t()
+    #if not get_tinfo(tif, func_ea):
+    #    logger.warning(f"Can't get type info for {func_ea}")
+    #    return
+    #if not tif.get_func_details(funcdata):
+    #    logger.warning(f"Can't get function type info for {func_ea}")
+    #    return
+    #for i, resh_arg in enumerate(resh_type_content.arguments):
+    #    if i>=len(funcdata):
+    #        #TODO
+    #        continue
+    #    print(funcdata[i].type, resh_arg)
 
     return
 
@@ -294,9 +299,13 @@ def import_symbols(resh: Reshare):
     for sym in resh.symbols:
         if sym.type is None:
             continue
-        resh_type: ReshDataType = S.resh_data_types[sym.type.type_name]
-        if resh_type is None:
+        resh_type=S.resh_data_types[sym.type.type_name]
+        if sym.type.type_name not in S.ida_data_types:
             logger.warning(f"Can't find {sym.type.type_name}")
+            continue
+        ida_type: tinfo_t = S.ida_data_types[sym.type.type_name]
+        if ida_type is None:
+            logger.warning(f"Symbols IDA type is None ({sym.type.type_name})")
             continue
         if resh_type.content.type=="FUNCTION":
             if (
@@ -307,9 +316,9 @@ def import_symbols(resh: Reshare):
                 and FUNC_SYM_IMPORT_DENY_RE.fullmatch(sym.name) is not None
             ):
                 continue
-            set_function_signature(sym.name, resh_type)
+            set_function_signature(sym.name, ida_type)
         else:
-            ida_sym_type:tinfo_t = get_ida_type_by_name(sym.type.type_name)
+            pass
             # TODO
 
 
