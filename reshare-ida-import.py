@@ -37,6 +37,8 @@ class ReshIDAState:
 # ...like so:
 S=ReshIDAState({},{})
 
+S.ida_data_types["T_VOID *"]=tinfo_t("void *")
+
 def get_ida_type_by_name(name: str) -> tinfo_t:
     if name in S.resh_data_types:
         return get_ida_type_from_resh_type(S.resh_data_types[name])
@@ -120,7 +122,10 @@ def set_function_signature(name: str, ida_type: tinfo_t):
 
     return
 
-DEBUG_DT=None
+type_replace_re=re.compile(r"[\[\]]")
+def canonize_type_name(name:str) -> str:
+    return type_replace_re.sub("_",name.strip())
+
 def get_ida_type_from_resh_type(resh_type: ReshDataType)->tinfo_t|None:
     global DEBUG_DT
     type_name=resh_type.name.strip()
@@ -194,35 +199,43 @@ def get_ida_type_from_resh_type(resh_type: ReshDataType)->tinfo_t|None:
             member_type=get_ida_type_by_name(m.type.type_name)
             if member_type is None:
                 raise ReshIDAException(f"Can't find union member type {m.type.type_name}")
-            udt_member=udt.add_member(m.name,member_type,m.offset)
+            udt_member=udt.add_member(m.name,member_type)
             #print(udt_member.name, udt_member.offset, udt_member.size)
+            if not udt_member:
+                raise ReshIDAException(f"Can't add union member {m.name} to {type_name}")
 
         if not ret.create_udt(udt, BTF_UNION):
             # TODO If we can't figure out union offsets we just return empty for now
             udt = udt_type_data_t()
             udt.is_union = True
             ret.create_udt(udt, BTF_UNION)
-            #raise ReshIDAException("Can't create UDT for union '%s'" % (type_name))
+            raise ReshIDAException("Can't create UDT for union '%s'" % (type_name))
         S.ida_data_types[type_name] = ret
     elif resh_type.content.type=="STRUCTURE":
         logger.info(f"Creating structure {type_name}")
         struct_content: ReshDataTypeContentStructure = resh_type.content # type: ignore
         udt = udt_type_data_t()
         S.ida_data_types[type_name] = ret # Self-references!
-        # IDA freaks out if offsets don't line up so we just add members in order and hope for the best
 
-        udm = udm_t()
+        # IDA freaks out if offsets don't line up so we just add members in order and hope for the best
+        # udm = udm_t()
+        last_offset = 0
         for m in struct_content.members:
+            if last_offset<udt.total_size:
+                offset_diff = m.offset - udt.total_size
+                logger.warning(f"OFFSET MISMATCH - Add {offset_diff} byte at {last_offset} offset to {type_name}")
+
             member_type = get_ida_type_by_name(m.type.type_name)
             if member_type is None:
                 raise ReshIDAException(f"Can't find member type {m.type.type_name}")
-            #udt_member=udt.add_member(m.name, member_type)
-            udm.name = m.name
-            udm.type = member_type
+            udt_member=udt.add_member(m.name, member_type, m.offset)
+            #udm.name = m.name
+            #udm.type = member_type
             logger.info(f"Adding struct member {m.name} to {type_name}")
-            udt.push_back(udm)
-            #if udt_member is None:
-            #    raise ReshIDAException("Can't add UDT member to struct '%s'" % (type_name,))
+            #udt.push_back(udm)
+            if udt_member is None:
+                raise ReshIDAException("Can't add UDT member to struct '%s'" % (type_name,))
+            last_offset = udt_member.offset+member_type.get_size()
             #print(udt_member.name, udt_member.offset, udt_member.size)
         logger.info(f"Created members for {type_name}")
         # Do as Romans do: we must check status codes to see where things go wrong
@@ -262,7 +275,7 @@ def get_ida_type_from_resh_type(resh_type: ReshDataType)->tinfo_t|None:
     #ret.get_named_type(None, type_name)
     if ret is not None:
         try:
-            ret.set_named_type(None,type_name, 0x404)
+            ret.set_named_type(None,canonize_type_name(type_name), 0x404)
             logger.info(f"Successfully named and saved '{type_name}'")
         except:
             #logger.error(f"Can't add name to type '{type_name}'")
