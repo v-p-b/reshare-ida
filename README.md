@@ -8,7 +8,7 @@ Install the project dependencies in the virtual environment of your choice:
 
 ```
 reshare-ida/ $ python3 -m venv venv
-reshre-dia/ $ source venv/bin/activate
+reshare-dia/ $ source venv/bin/activate
 (venv) reshare-ida/ $ pip install .
 ```
 
