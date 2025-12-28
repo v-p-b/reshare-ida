@@ -10,7 +10,7 @@ from ida_typeinf import (
     TVST_DEF,
     type_mods_t,
     udt_type_data_t,
-    udm_t,
+    udm_t, array_type_data_t,
 )
 from ida_nalt import get_input_file_path, retrieve_input_file_md5
 from reshare import *
@@ -81,10 +81,14 @@ def get_udt_members(T: tinfo_t) -> list[ReshStructureMemberPy]:
         logger.info(f"  Member {T.get_type_name()}.{m.name}({m.size})") # Note: member unions have no name?
         resh_member_type = get_resh_data_type_from_ida(m.type)
         if resh_member_type is not None:
+            m_name=m.name
+            if len(m_name) == 0: # Unions don't have names!
+                m_name="resh_member_%08X" % (UNK_ID)
+                UNK_ID += 1
             # WARNING
             # If we move m out of this scope it gets all messed up!
             resh_member = ReshStructureMemberPy(
-                name=m.name,
+                name=m_name,
                 type=resh_member_type.name,
                 offset=int(int(m.offset)/8),  # Sizes are in bytes, offsets in bits?
             )
@@ -132,8 +136,12 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
             RESH_TYPE_CACHE[T_name] = ret
             return ret
     """
+    T_size = T.get_size()
+    if T_size == 0x11111111: # Checking for -1
+        # This usually indicates a typedef
+        T_size = -1 # TODO should we use a different indicator value?
 
-    ret = ReshDataType(name=T_name, size=int(T.get_size()), content=None, modifiers=[])
+    ret = ReshDataType(name=T_name, size=int(T_size), content=None, modifiers=[])
 
     RESH_TYPE_CACHE[T_name] = ret
 
@@ -142,15 +150,19 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
     elif T.is_typedef():
         content = ReshDataTypeContentPrimitivePy()
     elif T.is_struct() or T.is_union():
-        # visitor=tinfo_visitor()
-        # visitor.apply_to(T)
         members=get_udt_members(T)
         if T.is_struct():
             content = ReshDataTypeContentStructurePy(members=members)
         else:
             content = ReshDataTypeContentUnionPy(members=members)
     elif T.is_array():
-        pass  # TODO
+        array_details = array_type_data_t()
+        if not T.get_array_details(array_details):
+            raise ReshIDAException(f"Can't get array details for {T_name}")
+        elem_type: tinfo_t = array_details.elem_type # IDAPython documentation is lies!
+        logger.debug(f"ARRAY DETAILS: {T_name} {elem_type} {type(elem_type)}")
+        elem_resh_type=get_resh_data_type_from_ida(elem_type)
+        content = ReshDataTypeContentArrayPy(base_type=elem_resh_type.name, length=array_details.nelems)
     elif T.is_enum():
         pass  # TODO
     elif T.is_func():
