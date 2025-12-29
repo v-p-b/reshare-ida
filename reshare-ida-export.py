@@ -10,11 +10,12 @@ from ida_typeinf import (
     TVST_DEF,
     type_mods_t,
     udt_type_data_t,
-    udm_t, array_type_data_t,
+    udm_t, array_type_data_t, enum_type_data_t, bitfield_type_data_t,
 )
 from ida_nalt import get_input_file_path, retrieve_input_file_md5
 from reshare import *
 from reshare.helpers import *
+from dataclasses import dataclass
 
 # -----------------------------------------------------------------------------
 
@@ -23,7 +24,17 @@ EXPORT_PATH = "/tmp/reshare.json"
 
 # -----------------------------------------------------------------------------
 
-RESH_TYPE_CACHE: dict[str, ReshDataType] = {}
+resh_void=ReshDataTypePy(name="void", size=0, content=ReshDataTypeContentPrimitivePy())
+resh_pvoid=ReshDataTypePy(name="void*", size=0, content=ReshDataTypeContentPointerPy(target_type=resh_void.name))
+
+RESH_TYPE_CACHE: dict[str, ReshDataType] = {
+    "void": resh_void,
+    "VOID": resh_void,
+    "void*": resh_pvoid,
+    "PVOID": resh_pvoid,
+    "VOID*": resh_pvoid,
+}
+
 UNK_ID = 0 # ID for unknown things
 
 logger = logging.getLogger("pyghidra-export")
@@ -70,28 +81,50 @@ def _debug_object(o):
         except TypeError:
             pass
 
+def get_bitfield_range(bitfields: list[tuple[int, int]], range: tuple[int,int]) -> None|tuple[int, int]:
+    for start, length in bitfields:
+        if start <= range[0] <= start+length:
+            #if range[0]+range[1]>start+length:
+            #    raise ReshIDAException("Overlapping bitfields!")
+            return start, length
+    return None
+
 def get_udt_members(T: tinfo_t) -> list[ReshStructureMemberPy]:
     global UNK_ID
     details = udt_type_data_t()
     ret: list[ReshStructureMemberPy] = []
     if not T.get_udt_details(details):
         raise ReshIDAException("Can't retrieve struct UDT details")
+    bitfields: dict[tuple[int, int], ReshStructureMember]={}
     for member in details:
         m: udm_t = member
         logger.info(f"  Member {T.get_type_name()}.{m.name}({m.size})") # Note: member unions have no name?
+        byte_offset=int(int(m.offset) / 8)  # Sizes are in bytes, offsets in bits?
+        if m.type.is_bitfield():
+            r = get_bitfield_range(list(bitfields), (byte_offset, 1))
+            if r is not None:
+                bitfields[r].name+=f"_{m.name}" # TODO proper bitfield representation
+                continue
+
         resh_member_type = get_resh_data_type_from_ida(m.type)
         if resh_member_type is not None:
             m_name=m.name
+            if m.type.is_bitfield():
+                m_name=f"resh_bf_{m.name}"
+
             if len(m_name) == 0: # Unions don't have names!
                 m_name="resh_member_%08X" % (UNK_ID)
                 UNK_ID += 1
+
             # WARNING
             # If we move m out of this scope it gets all messed up!
             resh_member = ReshStructureMemberPy(
                 name=m_name,
                 type=resh_member_type.name,
-                offset=int(int(m.offset)/8),  # Sizes are in bytes, offsets in bits?
+                offset=byte_offset
             )
+            if m.type.is_bitfield():
+                bitfields[(byte_offset, resh_member_type.size)]=resh_member
             ret.append(resh_member)
         else:
             raise ReshIDAException(f"Can't create member type for {T.name}.{m.name}")
@@ -101,61 +134,85 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
     global UNK_ID
     content: ReshDataTypeContent = ReshDataTypeContentPrimitivePy()
 
-    #if isinstance(T, int):
-    #    logger.error(f"Can't handle ints as types...")
-    #    return None
-
     T_name: str = T.get_type_name()
+    #if T.is_func():
+    #    T_name=f"func_{T.get_tid()}"
+    #    logger.debug(f"FUNCTION TYPE {T_name}")
     if T_name is None or len(T_name)==0:
         T_name = "resh_unk_%08X" % (UNK_ID,)
         UNK_ID += 1
-    # if T_name=="PIRP":
-    #    _debug_object(T)
-    #    raise ReshIDAException("Debug exit")
 
     logger.info(f"{T_name} ({T.get_size()}) UDT: {T.is_udt()} Typedef: {T.is_typedef()} Typeref: {T.is_typeref()}")
     if T_name in RESH_TYPE_CACHE:
         return RESH_TYPE_CACHE[T_name]
 
-    """
-    if T.is_typedef() or T.is_typeref():
-        logger.debug(f"Resolving typedef {T_name}")
-        _debug_object(T)
-        ref: tinfo_t|int = T.get_realtype(True)
-        if isinstance(ref, int):
-            logger.error(f"Fuck {T.get_type_name()}")
+    T_size = int(T.get_size())
+    if T_size == 0xFFFFFFFFFFFFFFFF: # Checking for -1
+        # This usually indicates a typedef or forward declaration
+        T_size = 0 # TODO should we use a different indicator value?
 
-            ret = ReshDataType(name=T_name, size=int(T.get_size()), content=content, modifiers=[])
-            return ret
-            # We don't know what the fresh hell this is supposed to be, let's continue with a primitive type...
-        else:
-            logger.debug(f"Resolved to {ref.get_type()}")
-            ret=get_resh_data_type_from_ida(ref)
-            if ret is None:
-                raise ReshIDAException(f"Can't resolve typedef ({T_name})!")
-            RESH_TYPE_CACHE[T_name] = ret
-            return ret
-    """
-    T_size = T.get_size()
-    if T_size == 0x11111111: # Checking for -1
-        # This usually indicates a typedef
-        T_size = -1 # TODO should we use a different indicator value?
-
-    ret = ReshDataType(name=T_name, size=int(T_size), content=None, modifiers=[])
+    ret = ReshDataType(name=T_name, size=T_size, content=None, modifiers=[])
 
     RESH_TYPE_CACHE[T_name] = ret
 
     if T.is_arithmetic():
+        logger.debug(f"Handling {T_name} as arithmentic")
         content = ReshDataTypeContentPrimitivePy()
-    elif T.is_typedef():
+    elif T.is_ptr() or T.is_funcptr():
+        # We handle pointers before the early bail at typedefs
+        logger.debug(f"Handling {T_name} as pointer")
+        base_type = T.get_pointed_object()
+        base_resh_type = get_resh_data_type_from_ida(base_type)
+        if T_name.startswith("resh"):
+            ret.name = base_resh_type.name + "*"
+        if base_resh_type is not None:
+            content = ReshDataTypeContentPointerPy(target_type=base_resh_type.name)
+        else:
+            raise ReshIDAException("Base type not found for pointer")
+    elif T.is_func():
+        # We handle functions before the early bail at typedefs
+        logger.debug(f"Handling {T_name} as function")
+        try:
+            arguments: list[ReshFunctionArgument] = []
+            logger.debug(f"FUNCTION: {T}")
+            for i, arg in enumerate(T.iter_func()):
+                logger.debug(f"FUNTYPE: {arg.type} {arg.name}")
+                arg_name = arg.name
+                if len(arg.name) == 0:
+                    arg_name = f"resh_param{i}"
+                arg_type = get_resh_data_type_from_ida(arg.type)
+                arguments.append(ReshFunctionArgumentPy(type=arg_type.name, name=arg_name))
+            ret_type = T.get_rettype()
+            if ret_type is None:
+                raise ReshIDAException("IDA function prototype doesn't have a return type!")
+            resh_ret_type = get_resh_data_type_from_ida(ret_type)
+            if resh_ret_type is None:
+                raise ReshIDAException("Can't find function return type!")
+            content = ReshDataTypeContentFunctionPy(arguments=arguments, return_type=resh_ret_type.name)
+        except TypeError:
+            logging.error(f"According to IDA this function is not a function: {T_name}")
+            _debug_object(T)
+    elif T.is_typedef() or T.is_forward_decl():
+        logger.debug(f"Handling {T_name} as typedef")
         content = ReshDataTypeContentPrimitivePy()
+    elif T.is_bitfield():
+        logger.debug(f"Handling {T_name} as bitfield")
+        bf_details=bitfield_type_data_t()
+        if not T.get_bitfield_details(bf_details):
+            raise ReshIDAException("Can't get bitfield details")
+        #logger.debug(f"BITFIELD: {T_name}")
+        content=ReshDataTypeContentPrimitivePy()
+        ret.size=bf_details.nbytes
+        ret.name+="_bf"
     elif T.is_struct() or T.is_union():
+        logger.debug(f"Handling {T_name} as struct/union")
         members=get_udt_members(T)
         if T.is_struct():
             content = ReshDataTypeContentStructurePy(members=members)
         else:
             content = ReshDataTypeContentUnionPy(members=members)
     elif T.is_array():
+        logger.debug(f"Handling {T_name} as array")
         array_details = array_type_data_t()
         if not T.get_array_details(array_details):
             raise ReshIDAException(f"Can't get array details for {T_name}")
@@ -164,22 +221,24 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
         elem_resh_type=get_resh_data_type_from_ida(elem_type)
         content = ReshDataTypeContentArrayPy(base_type=elem_resh_type.name, length=array_details.nelems)
     elif T.is_enum():
-        pass  # TODO
-    elif T.is_func():
-        pass  # TODO
-    elif T.is_ptr():
-        base_type = T.get_pointed_object()
-        base_resh_type = get_resh_data_type_from_ida(base_type)
-        # if T_name == "PIRP":
-        # logger.error(base_type)
-        # _debug_object(base_type)
-        # logger.error(base_resh_type)
-        # raise ReshIDAException("Debug exit")
-        if base_resh_type is not None:
-            content = ReshDataTypeContentPointerPy(target_type=base_resh_type.name)
-        else:
-            raise ReshIDAException("Base type not found for pointer")
+        logger.debug(f"Handling {T_name} as enum")
+        enum_details = enum_type_data_t()
+        if not T.get_enum_details(enum_details):
+            raise ReshIDAException(f"Can't get enum details for {T_name}")
+        enum_size=enum_details.size()
+        enum_members: list[ReshEnumMember]=[]
+        for e in T.iter_enum():
+            em=ReshEnumMember(name=e.name, value=e.value)
+            enum_members.append(em)
+        base_type_name=f"{T_name}_enum_base"
+        base_type=ReshDataTypePy(name=base_type_name, content=ReshDataTypeContentPrimitivePy(), size=enum_size)
+        RESH_TYPE_CACHE[base_type_name]=base_type
+        content=ReshDataTypeContentEnumPy(base_type=base_type.name,members=enum_members)
+    elif T_size == 0:
+        del RESH_TYPE_CACHE[T_name]
+        return RESH_TYPE_CACHE["void"]
     else:
+        logger.error(f"Can't handle type {T_name}")
         _debug_object(T)
         #raise ReshIDAException("Unhandled type!")
 
