@@ -6,5 +6,5 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "ida-domain>=0.3.3",
-    "reshare==0.1.2",
+    "reshare==0.1.3",
 ]
