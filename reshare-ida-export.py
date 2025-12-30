@@ -14,7 +14,7 @@ from ida_typeinf import (
     udm_t,
     array_type_data_t,
     enum_type_data_t,
-    bitfield_type_data_t,
+    bitfield_type_data_t, func_type_data_t,
 )
 from ida_nalt import get_input_file_path, retrieve_input_file_md5
 from reshare.helpers import *
@@ -144,7 +144,9 @@ def get_resh_func_content_from_ida(T: tinfo_t) -> ReshDataTypeContentFunctionPy:
     try:
         arguments: list[ReshFunctionArgument] = []
         logger.debug(f"FUNCTION: {T}")
+
         for i, arg in enumerate(T.iter_func()):
+            logger.debug(f"FUCK {i}")
             arg_name = arg.name
             if len(arg.name) == 0:
                 arg_name = f"resh_param{i}"
@@ -161,6 +163,8 @@ def get_resh_func_content_from_ida(T: tinfo_t) -> ReshDataTypeContentFunctionPy:
         )
     except TypeError:
         logging.error(f"According to IDA this function is not a function: {T}")
+        tmp=func_type_data_t()
+        logger.debug(f"  is_func: {T.is_func()} details: {T.get_func_details(tmp)}")
         _debug_object(T)
         raise
 
@@ -168,12 +172,19 @@ def get_resh_func_content_from_ida(T: tinfo_t) -> ReshDataTypeContentFunctionPy:
 def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
     content: ReshDataTypeContent = ReshDataTypeContentPrimitivePy()
 
+    T_size = int(T.get_size())
+    if T_size == 0xFFFFFFFFFFFFFFFF:  # Checking for -1
+        # This usually indicates a typedef or forward declaration
+        T_size = 0  # TODO should we use a different indicator value?
+
     T_name: str = T.get_type_name()
-    # if T.is_func():
-    #    T_name=f"func_{T.get_tid()}"
-    #    logger.debug(f"FUNCTION TYPE {T_name}")
+
     if T_name is None or len(T_name) == 0:
-        T_name = "resh_unk_%08X" % (get_unique(),)
+        if T.is_arithmetic() and T_size > 0:
+            # Unnamed primitive types are just sparkly ints
+            T_name=f"resh_int%d" % (T_size*8)
+        else:
+            T_name = "resh_unk_%08X" % (get_unique(),)
 
     logger.info(
         f"{T_name} ({T.get_size()}) UDT: {T.is_udt()} Typedef: {T.is_typedef()} Typeref: {T.is_typeref()}"
@@ -181,10 +192,6 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
     if T_name in RESH_TYPE_CACHE:
         return RESH_TYPE_CACHE[T_name]
 
-    T_size = int(T.get_size())
-    if T_size == 0xFFFFFFFFFFFFFFFF:  # Checking for -1
-        # This usually indicates a typedef or forward declaration
-        T_size = 0  # TODO should we use a different indicator value?
 
     ret = ReshDataType(name=T_name, size=T_size, content=None, modifiers=[])
 
@@ -269,6 +276,7 @@ def get_resh_data_type_from_ida(T: tinfo_t) -> ReshDataType | None:
             base_type=base_type.name, members=enum_members
         )
     elif T_size == 0:
+        # If nothing matches but size is 0, let's just scream into the void
         del RESH_TYPE_CACHE[T_name]
         return RESH_TYPE_CACHE["void"]
     else:
